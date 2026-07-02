@@ -55,9 +55,11 @@ def is_excluded(key: str) -> bool:
 
 
 def label_for_key(key: str) -> tuple[str, str]:
-    """Gibt (Emoji, huebsches Label) fuer ein rohes JSON-Feld zurueck."""
+    """Gibt (Emoji, huebsches Label) fuer ein rohes JSON-Feld zurueck.
+    Prueft laengere/spezifischere Fragmente zuerst, damit z.B. 'final_kills'
+    nicht faelschlich als generisches 'kills' erkannt wird."""
     norm = re.sub(r"[^a-z]", "", key.lower())
-    for fragment, (emoji, label) in KNOWN_FIELDS.items():
+    for fragment, (emoji, label) in sorted(KNOWN_FIELDS.items(), key=lambda kv: -len(kv[0])):
         if fragment in norm:
             return emoji, label
     return "📊", key
