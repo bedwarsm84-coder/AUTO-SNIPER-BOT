@@ -165,23 +165,30 @@ class TrackingCog(commands.Cog):
             name = info["display_name"]
             channel_id = info.get("channel_id") or DEFAULT_CHANNEL_ID
 
+            window_start_iso = storage.get_last_checked(name)
+            now_iso = datetime.now(timezone.utc).isoformat()
+
             try:
                 new_stats = await self.hive.get_all_stats(name)
             except HiveAPIError as e:
                 log.warning("Rate-Limit/Fehler bei %s: %s", name, e)
+                storage.set_last_checked(name, now_iso)
                 await asyncio.sleep(gap)
                 continue
             except Exception:
                 log.exception("Unerwarteter Fehler beim Abrufen von %s", name)
+                storage.set_last_checked(name, now_iso)
                 await asyncio.sleep(gap)
                 continue
 
             if new_stats is None:
+                storage.set_last_checked(name, now_iso)
                 await asyncio.sleep(gap)
                 continue
 
             old_stats = info.get("last_stats")
             storage.update_last_stats(name, new_stats)
+            storage.set_last_checked(name, now_iso)
 
             if old_stats is None:
                 await asyncio.sleep(gap)
@@ -191,9 +198,10 @@ class TrackingCog(commands.Cog):
 
             changes = diff_stats(old_stats, new_stats)
             if changes:
-                storage.set_last_active(name, datetime.now(timezone.utc).isoformat())
+                storage.set_last_active(name, now_iso)
             if changes and channel_id:
-                await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks)
+                await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks,
+                                        window_start_iso, now_iso)
 
             await asyncio.sleep(gap)
 
@@ -233,7 +241,8 @@ class TrackingCog(commands.Cog):
         return updated
 
     async def _send_alert(self, channel_id: int, name: str, old_stats: dict, new_stats: dict,
-                           changes: list[tuple[str, float, float]], streaks: dict[str, int]):
+                           changes: list[tuple[str, float, float]], streaks: dict[str, int],
+                           window_start_iso: str | None, window_end_iso: str):
         channel = self.bot.get_channel(channel_id)
         if channel is None:
             return
@@ -244,9 +253,20 @@ class TrackingCog(commands.Cog):
             game_key, mode_label, stat_key = split_game_mode(full_path)
             grouped.setdefault((game_key, mode_label), []).append((stat_key, old_v, new_v))
 
+        # Zeitfenster fuers Rundenende: irgendwo zwischen dem letzten Check ohne
+        # Aenderung und diesem Check. Rundenstart ist ueber diese Methode NICHT
+        # feststellbar - die API liefert kein "Runde gestartet"-Signal.
+        end_time = datetime.fromisoformat(window_end_iso)
+        if window_start_iso:
+            start_time = datetime.fromisoformat(window_start_iso)
+            window_desc = (f"🕒 Runde vermutlich beendet zwischen "
+                            f"**{start_time.strftime('%H:%M:%S')}** und **{end_time.strftime('%H:%M:%S')} UTC**")
+        else:
+            window_desc = f"🕒 Erkannt um **{end_time.strftime('%H:%M:%S')} UTC**"
+
         embed = discord.Embed(
             title=f"📈 {name} hat gerade eine Runde beendet",
-            description="Erkannt anhand gestiegener Statistik-Werte (nicht in Echtzeit).",
+            description=f"{window_desc}\n_Rundenstart ist über diese Methode nicht feststellbar._",
             color=0x2ECC71,
         )
 
@@ -290,4 +310,3 @@ class TrackingCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(TrackingCog(bot))
-     
