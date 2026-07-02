@@ -1,5 +1,6 @@
 """
 Sehr simple JSON-Datei-Persistenz fuer beobachtete Spieler + letzten Stats-Snapshot.
+Fuer den Anfang voellig ausreichend; bei Bedarf spaeter durch eine echte DB ersetzbar.
 """
 from __future__ import annotations
 
@@ -35,6 +36,7 @@ def add_player(name: str, channel_id: int) -> bool:
         "display_name": name,
         "channel_id": channel_id,
         "last_stats": None,
+        "streaks": {},  # z.B. {"bed": 5, "sky|Solo": 2}
     }
     save(data)
     return True
@@ -59,4 +61,18 @@ def update_last_stats(name: str, stats: dict) -> None:
     key = name.lower()
     if key in data["players"]:
         data["players"][key]["last_stats"] = stats
+        save(data)
+
+
+def get_streaks(name: str) -> dict:
+    data = load()
+    key = name.lower()
+    return data["players"].get(key, {}).get("streaks", {})
+
+
+def set_streak(name: str, streak_key: str, value: int) -> None:
+    data = load()
+    key = name.lower()
+    if key in data["players"]:
+        data["players"][key].setdefault("streaks", {})[streak_key] = value
         save(data)
