@@ -91,3 +91,17 @@ def get_last_active(name: str) -> str | None:
     data = load()
     key = name.lower()
     return data["players"].get(key, {}).get("last_active_at")
+
+
+def set_last_checked(name: str, iso_timestamp: str) -> None:
+    data = load()
+    key = name.lower()
+    if key in data["players"]:
+        data["players"][key]["last_checked_at"] = iso_timestamp
+        save(data)
+
+
+def get_last_checked(name: str) -> str | None:
+    data = load()
+    key = name.lower()
+    return data["players"].get(key, {}).get("last_checked_at")
