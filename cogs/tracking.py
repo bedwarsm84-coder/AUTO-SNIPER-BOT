@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime, timezone
 
 import discord
 from discord import app_commands
@@ -118,6 +119,38 @@ class TrackingCog(commands.Cog):
             embed.add_field(name=label, value=f"🔥 **{value}**", inline=True)
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(description="Zeigt an, ob ein beobachteter Spieler kürzlich aktiv war (basiert auf Stats-Änderungen, kein echter Live-Status)")
+    @app_commands.describe(name="Minecraft-Bedrock-Name")
+    async def online(self, interaction: discord.Interaction, name: str):
+        last_active_iso = storage.get_last_active(name)
+        if last_active_iso is None:
+            await interaction.response.send_message(
+                f"Für `{name}` liegt noch keine Aktivitätsdaten vor. "
+                f"Erst `/track` starten und einen Poll-Zyklus abwarten – oder es gab bisher keine erkannte Stats-Änderung."
+            )
+            return
+
+        last_active = datetime.fromisoformat(last_active_iso)
+        now = datetime.now(timezone.utc)
+        delta = now - last_active
+        minutes = int(delta.total_seconds() // 60)
+
+        if minutes < 5:
+            status = "🟢 **Wahrscheinlich aktiv**"
+            detail = f"Stats haben sich vor {int(delta.total_seconds())}s geändert."
+        elif minutes < 30:
+            status = "🟡 **Kürzlich aktiv**"
+            detail = f"Letzte erkannte Stats-Änderung vor {minutes} Minuten."
+        else:
+            status = "⚪ **Vermutlich inaktiv**"
+            hours = minutes // 60
+            detail = f"Letzte erkannte Stats-Änderung vor {hours}h {minutes % 60}min." if hours else f"Letzte erkannte Stats-Änderung vor {minutes} Minuten."
+
+        embed = discord.Embed(title=f"{name}", description=f"{status}\n{detail}", color=0x3498DB)
+        embed.set_footer(text="Kein echter Live-Status – basiert auf periodischem Stats-Vergleich (Poll-Intervall: "
+                               f"{POLL_INTERVAL}s). Hive bietet keinen offiziellen Online-Status.")
+        await interaction.response.send_message(embed=embed)
+
     @tasks.loop(seconds=POLL_INTERVAL)
     async def poll_loop(self):
         players = storage.get_players()
@@ -157,6 +190,8 @@ class TrackingCog(commands.Cog):
             streaks = self._update_streaks(name, old_stats, new_stats)
 
             changes = diff_stats(old_stats, new_stats)
+            if changes:
+                storage.set_last_active(name, datetime.now(timezone.utc).isoformat())
             if changes and channel_id:
                 await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks)
 
@@ -255,3 +290,4 @@ class TrackingCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(TrackingCog(bot))
+     
