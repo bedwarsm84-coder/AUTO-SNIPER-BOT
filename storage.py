@@ -36,7 +36,8 @@ def add_player(name: str, channel_id: int) -> bool:
         "display_name": name,
         "channel_id": channel_id,
         "last_stats": None,
-        "streaks": {},  # z.B. {"bed": 5, "sky|Solo": 2}
+        "streaks": {},       # z.B. {"bed|": 5, "sky|Solo": 2}
+        "last_active_at": None,  # ISO-Timestamp der letzten erkannten Stats-Aenderung
     }
     save(data)
     return True
@@ -76,3 +77,17 @@ def set_streak(name: str, streak_key: str, value: int) -> None:
     if key in data["players"]:
         data["players"][key].setdefault("streaks", {})[streak_key] = value
         save(data)
+
+
+def set_last_active(name: str, iso_timestamp: str) -> None:
+    data = load()
+    key = name.lower()
+    if key in data["players"]:
+        data["players"][key]["last_active_at"] = iso_timestamp
+        save(data)
+
+
+def get_last_active(name: str) -> str | None:
+    data = load()
+    key = name.lower()
+    return data["players"].get(key, {}).get("last_active_at")
