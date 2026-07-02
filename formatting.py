@@ -26,6 +26,7 @@ KNOWN_FIELDS: dict[str, tuple[str, str]] = {
     "winstreak": ("🔥", "Winstreak"),
     "win_streak": ("🔥", "Winstreak"),
     "streak": ("🔥", "Winstreak"),
+    "victories": ("🏆", "Wins"),
     "wins": ("🏆", "Wins"),
     "losses": ("💀", "Losses"),
     "kills": ("⚔️", "Kills"),
@@ -34,9 +35,23 @@ KNOWN_FIELDS: dict[str, tuple[str, str]] = {
     "finaldeaths": ("🪦", "Final Deaths"),
     "bedsdestroyed": ("🛏️", "Beds Destroyed"),
     "level": ("⭐", "Level"),
+    "prestige": ("🎖️", "Prestige"),
     "xp": ("✨", "XP"),
+    "played": ("🎮", "Games Played"),
     "gamesplayed": ("🎮", "Games Played"),
 }
+
+# Felder, die zwar in der API-Antwort stehen, aber keine anzeigbaren Stats sind
+# (IDs, Zeitstempel usw.) - werden in /stats und Alerts ausgeblendet.
+EXCLUDED_FIELDS: set[str] = {
+    "uuid", "id", "firstplayed", "lastplayed", "createdat", "updatedat",
+}
+
+
+def is_excluded(key: str) -> bool:
+    """True fuer Felder, die keine anzeigbaren Stats sind (UUID, Timestamps, ...)."""
+    norm = re.sub(r"[^a-z]", "", key.lower())
+    return norm in EXCLUDED_FIELDS
 
 
 def label_for_key(key: str) -> tuple[str, str]:
@@ -80,3 +95,54 @@ def compute_kd(data: dict) -> float | None:
     if deaths == 0:
         return float(kills)
     return round(kills / deaths, 2)
+
+
+# ---------------------------------------------------------------------------
+# "Live"-Winstreak: von der Hive-API selbst NICHT geliefert (siehe README).
+# Wird hier client-seitig mitgezaehlt: jeder erkannte Sieg zaehlt hoch,
+# jede erkannte Runde ohne Sieg setzt zurueck auf 0. Basiert auf dem
+# periodischen Vergleich von "wins"/"victories" und "played"/"gamesplayed".
+# ---------------------------------------------------------------------------
+
+def extract_wins_played(data: dict) -> tuple[float | None, float | None]:
+    """Sucht wins- und played-aehnliche Felder in einem flachen Stats-Dict."""
+    wins = played = None
+    for key, value in data.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        norm = re.sub(r"[^a-z]", "", key.lower())
+        if norm in ("wins", "victories"):
+            wins = value
+        elif norm in ("played", "gamesplayed"):
+            played = value
+    return wins, played
+
+
+def leaf_stat_dicts(game_data: dict) -> dict[str | None, dict]:
+    """
+    Zerlegt die Stats eines Spiels in {modus_label_oder_None: flaches_stats_dict}.
+    Wenn keine Modus-Unterteilung existiert (haeufig bei Hive), gibt es genau
+    einen Eintrag mit Key None.
+    """
+    if any(k.lower() in MODE_ALIASES for k in game_data.keys()):
+        result: dict[str | None, dict] = {}
+        for key, value in game_data.items():
+            if isinstance(value, dict):
+                result[MODE_ALIASES.get(key.lower(), key.capitalize())] = value
+        return result
+    return {None: game_data}
+
+
+def update_streak(old_streak: int, delta_played: float, delta_wins: float) -> int:
+    """
+    Schreibt einen client-seitig gezaehlten Winstreak fort.
+    - Keine neue Runde seit dem letzten Check -> Streak bleibt gleich.
+    - Alle neuen Runden waren Siege -> Streak steigt um delta_wins.
+    - Mindestens eine neue Runde war kein Sieg -> Streak wird auf 0 zurueckgesetzt
+      (konservative Annahme, falls im Poll-Intervall mehrere Runden lagen).
+    """
+    if delta_played <= 0:
+        return old_streak
+    if delta_wins >= delta_played:
+        return old_streak + int(delta_wins)
+    return 0
