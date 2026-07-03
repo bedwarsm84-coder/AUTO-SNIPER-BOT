@@ -1,10 +1,12 @@
 """
-Schlanker Wrapper um die offizielle Hive (Bedrock) API.
-Dokumentation: https://support.playhive.com/api/
-OpenAPI-Spec:  https://api.playhive.com/docs/api-docs.json
+hive_api.py
+Thin async wrapper around the official Hive (Bedrock) API.
+Docs: https://support.playhive.com/api/
+OpenAPI spec: https://api.playhive.com/docs/api-docs.json
 
-WICHTIG: Diese API bietet KEINE Online-/Offline-/"aktuelles Spiel"-Daten.
-Es gibt nur Statistik-Endpunkte (Wins, Kills, ...). Siehe README.md.
+IMPORTANT: This API does NOT expose live online/offline status, current
+game/server, or a player's location. There is no endpoint for that. See
+README.md for details on what this bot can and cannot do.
 """
 from __future__ import annotations
 
@@ -24,7 +26,7 @@ class HiveAPI:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            headers = {"User-Agent": "HiveStatsDiscordBot/1.0 (+github.com/dein-repo)"}
+            headers = {"User-Agent": "HiveStatsDiscordBot/2.0"}
             if self.api_key:
                 headers["Authorization"] = f"Bearer {self.api_key}"
             self._session = aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=15))
@@ -41,24 +43,26 @@ class HiveAPI:
             if resp.status == 404:
                 return None
             if resp.status == 429:
-                retry_after = resp.headers.get("Retry-After", "unbekannt")
-                raise HiveAPIError(f"Rate-Limit erreicht (Retry-After: {retry_after}s). "
-                                    f"Ohne HIVE_API_KEY ist das Limit sehr niedrig.")
+                retry_after = resp.headers.get("Retry-After", "unknown")
+                raise HiveAPIError(
+                    f"Rate limit hit (Retry-After: {retry_after}s). "
+                    f"Without a HIVE_API_KEY the rate limit is very low."
+                )
             if resp.status >= 400:
-                raise HiveAPIError(f"HTTP {resp.status} bei {path}")
+                raise HiveAPIError(f"HTTP {resp.status} on {path}")
             return await resp.json()
 
     async def search_player(self, partial: str):
-        """Spieler per Namens-Praefix suchen (min. 4 Zeichen)."""
+        """Search players by name prefix (min. 4 characters)."""
         return await self._get(f"/player/search/{partial}")
 
     async def get_all_stats(self, identifier: str):
-        """Alle Spiel-Statistiken eines Spielers in einem Call (effizient fuers Polling)."""
+        """All game stats for a player in a single call (efficient for polling)."""
         return await self._get(f"/game/all/all/{identifier}")
 
     async def get_main_stats(self, identifier: str):
         return await self._get(f"/game/all/main/{identifier}")
 
     async def get_game_stats(self, game: str, identifier: str):
-        """Statistiken fuer ein einzelnes Spiel, z.B. game='bed' fuer BedWars."""
+        """Stats for a single game, e.g. game='bed' for BedWars."""
         return await self._get(f"/game/all/{game}/{identifier}")
