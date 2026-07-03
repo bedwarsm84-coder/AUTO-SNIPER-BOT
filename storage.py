@@ -1,6 +1,7 @@
 """
-Sehr simple JSON-Datei-Persistenz fuer beobachtete Spieler + letzten Stats-Snapshot.
-Fuer den Anfang voellig ausreichend; bei Bedarf spaeter durch eine echte DB ersetzbar.
+storage.py
+Simple JSON-file persistence for the player watchlist, per-player stat
+snapshots, computed win streaks, and activity timestamps.
 """
 from __future__ import annotations
 
@@ -19,7 +20,11 @@ def _ensure():
 
 def load() -> dict:
     _ensure()
-    return json.loads(DATA_FILE.read_text())
+    try:
+        return json.loads(DATA_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        # Corrupt or unreadable file: start fresh rather than crashing the bot.
+        return {"players": {}}
 
 
 def save(data: dict) -> None:
@@ -36,8 +41,9 @@ def add_player(name: str, channel_id: int) -> bool:
         "display_name": name,
         "channel_id": channel_id,
         "last_stats": None,
-        "streaks": {},       # z.B. {"bed|": 5, "sky|Solo": 2}
-        "last_active_at": None,  # ISO-Timestamp der letzten erkannten Stats-Aenderung
+        "streaks": {},            # e.g. {"bed|": 5, "sky|Solo": 2}
+        "last_active_at": None,   # ISO timestamp of the last detected stat change
+        "last_checked_at": None,  # ISO timestamp of the last poll attempt
     }
     save(data)
     return True
