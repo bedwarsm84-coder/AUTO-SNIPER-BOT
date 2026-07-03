@@ -1,21 +1,24 @@
 """
 cogs/stats.py
-Slash-Commands zum Abfragen von Hive-Statistiken.
+Slash commands for looking up Hive stats.
 
-Upgrade: erkennt bekannte Felder (Wins, Kills, Winstreak, ...) hübsch formatiert,
-berechnet KD wo möglich, und gruppiert nach Spielmodus (Solo/Duos/Squads/Mega),
-falls die API-Antwort das entsprechend verschachtelt.
+Displays known fields (Wins, Kills, Winstreak, ...) with nice labels,
+computes KD where possible, and groups by game mode (Solo/Duos/Squads/Mega)
+if the API response is actually nested that way for the given game.
 """
 from __future__ import annotations
 
 import json
+import logging
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from hive_api import HiveAPIError
-from formatting import label_for_key, compute_kd, MODE_ALIASES
+from formatting import label_for_key, compute_kd, MODE_ALIASES, is_excluded
+
+log = logging.getLogger("hivebot.stats")
 
 GAME_NAMES = {
     "wars": "Treasure Wars", "dr": "Deathrun", "hide": "Hide & Seek",
@@ -27,21 +30,24 @@ GAME_NAMES = {
 
 
 def _is_mode_split(data: dict) -> bool:
-    """Prüft, ob ein Stats-Dict nach Modi (solo/duos/squads/...) verschachtelt ist."""
+    """Checks whether a stats dict is nested by mode (solo/duos/squads/...)."""
     return any(k.lower() in MODE_ALIASES for k in data.keys())
 
 
 def _format_block(data: dict, limit: int = 10) -> str:
-    """Formatiert ein flaches Stats-Dict als hübsche Zeilenliste inkl. KD."""
+    """Formats a flat stats dict as a nice line list including KD.
+    Only shows numeric stat fields (no UUID/timestamps/strings)."""
     lines = []
     for key, value in list(data.items()):
-        if isinstance(value, (int, float, str)):
+        if is_excluded(key):
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             emoji, label = label_for_key(key)
             lines.append(f"{emoji} **{label}**: {value}")
     kd = compute_kd(data)
     if kd is not None:
         lines.append(f"⚡ **KD**: {kd}")
-    return "\n".join(lines[:limit]) if lines else "_keine Felder gefunden_"
+    return "\n".join(lines[:limit]) if lines else "_No displayable fields found_"
 
 
 class StatsCog(commands.Cog):
@@ -49,24 +55,28 @@ class StatsCog(commands.Cog):
         self.bot = bot
         self.hive = bot.hive
 
-    @app_commands.command(description="Zeigt Hive-Statistiken eines Spielers")
+    @app_commands.command(description="Show a player's Hive stats")
     @app_commands.describe(
-        name="Minecraft-Bedrock-Name",
-        game="Kuerzel wie bed, sky, wars, murder ... (leer = alle Spiele)",
+        name="Minecraft Bedrock username",
+        game="Game code like bed, sky, wars, murder ... (leave empty for all games)",
     )
     async def stats(self, interaction: discord.Interaction, name: str, game: str | None = None):
         await interaction.response.defer()
         try:
             data = await self.hive.get_game_stats(game, name) if game else await self.hive.get_all_stats(name)
         except HiveAPIError as e:
-            await interaction.followup.send(f"⚠️ API-Fehler: {e}")
+            await interaction.followup.send(f"⚠️ API error: {e}")
+            return
+        except Exception:
+            log.exception("Unexpected error in /stats for %s", name)
+            await interaction.followup.send("⚠️ Something went wrong fetching that player's stats.")
             return
 
         if data is None:
-            await interaction.followup.send(f"❌ Spieler `{name}` nicht gefunden.")
+            await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
 
-        embed = discord.Embed(title=f"🐝 Hive-Stats: {name}", color=0xF5A623)
+        embed = discord.Embed(title=f"🐝 Hive Stats: {name}", color=0xF5A623)
 
         if game:
             if _is_mode_split(data):
@@ -89,7 +99,7 @@ class StatsCog(commands.Cog):
                     first_mode_key, first_mode_data = next(iter(game_data.items()))
                     mode_label = MODE_ALIASES.get(first_mode_key.lower(), first_mode_key.capitalize())
                     embed.add_field(
-                        name=f"{label} ({mode_label}, mehr via /stats game:{game_key})",
+                        name=f"{label} ({mode_label}, more via /stats game:{game_key})",
                         value=_format_block(first_mode_data, limit=6),
                         inline=False,
                     )
@@ -97,24 +107,28 @@ class StatsCog(commands.Cog):
                     embed.add_field(name=label, value=_format_block(game_data, limit=6), inline=False)
 
         if not embed.fields:
-            embed.description = "Keine auswertbaren Felder gefunden – probier `/raw` fuer die Rohdaten."
+            embed.description = "No displayable fields found — try `/raw` for the raw data."
         await interaction.followup.send(embed=embed)
 
-    @app_commands.command(description="Zeigt die rohe API-Antwort (z.B. um Modus-/Winstreak-Feldnamen zu finden)")
-    @app_commands.describe(name="Minecraft-Bedrock-Name", game="Kuerzel wie bed, sky, wars ... (leer = alle Spiele)")
+    @app_commands.command(description="Show the raw API response (e.g. to find mode/winstreak field names)")
+    @app_commands.describe(name="Minecraft Bedrock username", game="Game code like bed, sky, wars ... (leave empty for all games)")
     async def raw(self, interaction: discord.Interaction, name: str, game: str | None = None):
         await interaction.response.defer()
         try:
             data = await self.hive.get_game_stats(game, name) if game else await self.hive.get_all_stats(name)
         except HiveAPIError as e:
-            await interaction.followup.send(f"⚠️ API-Fehler: {e}")
+            await interaction.followup.send(f"⚠️ API error: {e}")
+            return
+        except Exception:
+            log.exception("Unexpected error in /raw for %s", name)
+            await interaction.followup.send("⚠️ Something went wrong fetching that player's data.")
             return
         if data is None:
-            await interaction.followup.send(f"❌ Spieler `{name}` nicht gefunden.")
+            await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
         text = json.dumps(data, indent=2, ensure_ascii=False)
         if len(text) > 1900:
-            text = text[:1900] + "\n... (gekuerzt, mit game=<kuerzel> gezielter abfragen)"
+            text = text[:1900] + "\n... (truncated, use game=<code> to narrow it down)"
         await interaction.followup.send(f"```json\n{text}\n```")
 
 
