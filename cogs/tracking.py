@@ -1,14 +1,16 @@
 """
 cogs/tracking.py
-Spieler-Beobachtung: periodischer Stats-Vergleich + Discord-Meldung bei Aenderung.
+Player watchlist: periodic stat comparison + Discord alert on change.
 
-Upgrade:
- - Kuerzeres Standard-Intervall (siehe README fuer Rate-Limit-Hinweis ohne API-Key)
- - Requests werden ueber das Intervall gestaffelt (kein Burst aller Spieler gleichzeitig)
- - Alerts gruppieren nach Spiel UND Modus (Solo/Duos/Squads/Mega), zeigen KD-Aenderung
+Robustness: every per-player step inside the poll loop is wrapped so a
+single failure (bad data, API hiccup, formatting bug) never kills the
+background loop for everyone else. Any unexpected exception is logged and
+the loop keeps running; a top-level @poll_loop.error handler restarts the
+loop automatically if it ever stops for an unforeseen reason.
 
-Wichtig: Das ist weiterhin KEIN Live-Online-Status. Die Hive-API bietet das nicht.
-Ein "Runde beendet"-Alert ist ein verzoegerter Hinweis anhand gestiegener Stat-Werte.
+Important: this is still NOT a live online/offline status. The Hive API does
+not provide that. A "round finished" alert is a delayed inference based on
+stat values going up.
 """
 from __future__ import annotations
 
@@ -36,7 +38,7 @@ DEFAULT_CHANNEL_ID = int(os.getenv("ALERT_CHANNEL_ID", "0")) or None
 
 
 def diff_stats(old, new, path: str = "") -> list[tuple[str, float, float]]:
-    """Findet alle numerischen Felder, die in `new` hoeher sind als in `old`."""
+    """Finds all numeric fields that are higher in `new` than in `old`."""
     changes: list[tuple[str, float, float]] = []
     if not isinstance(new, dict):
         return changes
@@ -55,7 +57,7 @@ def diff_stats(old, new, path: str = "") -> list[tuple[str, float, float]]:
 
 
 def _find_stats_dict(data: dict, path_prefix: str) -> dict | None:
-    """Navigiert im Stats-Dict entlang eines Pfad-Prefixes wie 'bed.solo'."""
+    """Navigates a stats dict along a path prefix like 'bed.solo'."""
     node = data
     for part in path_prefix.split("."):
         if not isinstance(node, dict) or part not in node:
@@ -73,44 +75,49 @@ class TrackingCog(commands.Cog):
     def cog_unload(self):
         self.poll_loop.cancel()
 
-    @app_commands.command(description="Beobachtet einen Spieler: meldet in diesem Kanal, wenn sich Stats aendern")
-    @app_commands.describe(name="Minecraft-Bedrock-Name")
+    # ---------------------------------------------------------------- commands
+
+    @app_commands.command(description="Track a player: alerts post in this channel when their stats change")
+    @app_commands.describe(name="Minecraft Bedrock username")
     async def track(self, interaction: discord.Interaction, name: str):
         ok = storage.add_player(name, interaction.channel_id)
         if ok:
             await interaction.response.send_message(
-                f"✅ `{name}` wird jetzt beobachtet (Check alle ~{POLL_INTERVAL}s, gestaffelt).\n"
-                f"⚠️ Kein Live-Online-Status möglich – nur verzögerte Meldung bei Stats-Erhöhung."
+                f"✅ Now tracking `{name}` (checked roughly every {POLL_INTERVAL}s, staggered).\n"
+                f"⚠️ No live online status possible — this only reports a delayed signal when stats increase."
             )
         else:
-            await interaction.response.send_message(f"`{name}` wird bereits beobachtet.")
+            await interaction.response.send_message(f"`{name}` is already being tracked.")
 
-    @app_commands.command(description="Beendet die Beobachtung eines Spielers")
-    @app_commands.describe(name="Minecraft-Bedrock-Name")
+    @app_commands.command(description="Stop tracking a player")
+    @app_commands.describe(name="Minecraft Bedrock username")
     async def untrack(self, interaction: discord.Interaction, name: str):
         ok = storage.remove_player(name)
-        await interaction.response.send_message("✅ Entfernt." if ok else f"`{name}` war nicht in der Liste.")
+        await interaction.response.send_message("✅ Removed." if ok else f"`{name}` was not being tracked.")
 
-    @app_commands.command(description="Listet aktuell beobachtete Spieler auf")
+    @app_commands.command(description="List all currently tracked players")
     async def tracked(self, interaction: discord.Interaction):
         players = storage.get_players()
         if not players:
-            await interaction.response.send_message("Aktuell wird niemand beobachtet.")
+            await interaction.response.send_message("No one is currently being tracked.")
             return
         names = ", ".join(p["display_name"] for p in players.values())
-        await interaction.response.send_message(f"Beobachtet: {names}")
+        await interaction.response.send_message(f"Tracked: {names}")
 
-    @app_commands.command(description="Zeigt die aktuell mitgezählten Live-Winstreaks eines beobachteten Spielers")
-    @app_commands.describe(name="Minecraft-Bedrock-Name")
+    @app_commands.command(description="Show the currently tracked live win streaks for a player")
+    @app_commands.describe(name="Minecraft Bedrock username")
     async def streak(self, interaction: discord.Interaction, name: str):
         streaks = storage.get_streaks(name)
         if not streaks:
             await interaction.response.send_message(
-                f"Noch keine Streak-Daten für `{name}`. Erst `/track` starten und einen Poll-Zyklus abwarten."
+                f"No streak data for `{name}` yet. Run `/track` first and wait for a poll cycle."
             )
             return
-        embed = discord.Embed(title=f"🔥 Live-Winstreaks: {name}", color=0xE67E22,
-                               description="Selbst mitgezählt (Hive liefert keinen Winstreak über die API).")
+        embed = discord.Embed(
+            title=f"🔥 Live Win Streaks: {name}",
+            color=0xE67E22,
+            description="Tracked client-side (Hive's API does not provide a winstreak field).",
+        )
         for streak_key, value in streaks.items():
             game_key, _, mode_label = streak_key.partition("|")
             label = GAME_NAMES.get(game_key, game_key)
@@ -119,14 +126,14 @@ class TrackingCog(commands.Cog):
             embed.add_field(name=label, value=f"🔥 **{value}**", inline=True)
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(description="Zeigt an, ob ein beobachteter Spieler kürzlich aktiv war (basiert auf Stats-Änderungen, kein echter Live-Status)")
-    @app_commands.describe(name="Minecraft-Bedrock-Name")
+    @app_commands.command(description="Show whether a tracked player was recently active (based on stat changes, not a real live status)")
+    @app_commands.describe(name="Minecraft Bedrock username")
     async def online(self, interaction: discord.Interaction, name: str):
         last_active_iso = storage.get_last_active(name)
         if last_active_iso is None:
             await interaction.response.send_message(
-                f"Für `{name}` liegt noch keine Aktivitätsdaten vor. "
-                f"Erst `/track` starten und einen Poll-Zyklus abwarten – oder es gab bisher keine erkannte Stats-Änderung."
+                f"No activity data for `{name}` yet. Run `/track` first and wait for a poll cycle — "
+                f"or no stat change has been detected yet."
             )
             return
 
@@ -136,20 +143,23 @@ class TrackingCog(commands.Cog):
         minutes = int(delta.total_seconds() // 60)
 
         if minutes < 5:
-            status = "🟢 **Wahrscheinlich aktiv**"
-            detail = f"Stats haben sich vor {int(delta.total_seconds())}s geändert."
+            status = "🟢 **Likely active**"
+            detail = f"Stats changed {int(delta.total_seconds())}s ago."
         elif minutes < 30:
-            status = "🟡 **Kürzlich aktiv**"
-            detail = f"Letzte erkannte Stats-Änderung vor {minutes} Minuten."
+            status = "🟡 **Recently active**"
+            detail = f"Last detected stat change {minutes} minutes ago."
         else:
-            status = "⚪ **Vermutlich inaktiv**"
             hours = minutes // 60
-            detail = f"Letzte erkannte Stats-Änderung vor {hours}h {minutes % 60}min." if hours else f"Letzte erkannte Stats-Änderung vor {minutes} Minuten."
+            status = "⚪ **Likely inactive**"
+            detail = (f"Last detected stat change {hours}h {minutes % 60}min ago."
+                       if hours else f"Last detected stat change {minutes} minutes ago.")
 
-        embed = discord.Embed(title=f"{name}", description=f"{status}\n{detail}", color=0x3498DB)
-        embed.set_footer(text="Kein echter Live-Status – basiert auf periodischem Stats-Vergleich (Poll-Intervall: "
-                               f"{POLL_INTERVAL}s). Hive bietet keinen offiziellen Online-Status.")
+        embed = discord.Embed(title=name, description=f"{status}\n{detail}", color=0x3498DB)
+        embed.set_footer(text=f"Not a real live status — based on periodic stat comparison "
+                               f"(poll interval: {POLL_INTERVAL}s). Hive has no official online status API.")
         await interaction.response.send_message(embed=embed)
+
+    # ---------------------------------------------------------------- polling
 
     @tasks.loop(seconds=POLL_INTERVAL)
     async def poll_loop(self):
@@ -157,56 +167,54 @@ class TrackingCog(commands.Cog):
         if not players:
             return
 
-        # Requests ueber das Intervall staffeln statt alle gleichzeitig zu feuern
-        # (schont das Rate-Limit, besonders ohne HIVE_API_KEY)
+        # Stagger requests across the interval instead of firing them all at
+        # once (kinder to the rate limit, especially without a HIVE_API_KEY).
         gap = max(POLL_INTERVAL / max(len(players), 1) * 0.8, 1.0)
 
-        for info in players.values():
-            name = info["display_name"]
-            channel_id = info.get("channel_id") or DEFAULT_CHANNEL_ID
-
-            window_start_iso = storage.get_last_checked(name)
-            now_iso = datetime.now(timezone.utc).isoformat()
-
+        for info in list(players.values()):
             try:
-                new_stats = await self.hive.get_all_stats(name)
-            except HiveAPIError as e:
-                log.warning("Rate-Limit/Fehler bei %s: %s", name, e)
-                storage.set_last_checked(name, now_iso)
-                await asyncio.sleep(gap)
-                continue
+                await self._poll_one_player(info)
             except Exception:
-                log.exception("Unerwarteter Fehler beim Abrufen von %s", name)
-                storage.set_last_checked(name, now_iso)
-                await asyncio.sleep(gap)
-                continue
-
-            if new_stats is None:
-                storage.set_last_checked(name, now_iso)
-                await asyncio.sleep(gap)
-                continue
-
-            old_stats = info.get("last_stats")
-            storage.update_last_stats(name, new_stats)
-            storage.set_last_checked(name, now_iso)
-
-            if old_stats is None:
-                await asyncio.sleep(gap)
-                continue  # erster Durchlauf: nur Baseline speichern
-
-            streaks = self._update_streaks(name, old_stats, new_stats)
-
-            changes = diff_stats(old_stats, new_stats)
-            if changes:
-                storage.set_last_active(name, now_iso)
-            if changes and channel_id:
-                await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks,
-                                        window_start_iso, now_iso)
-
+                # Never let a single player's failure kill the whole loop.
+                log.exception("Unexpected error while polling %s", info.get("display_name"))
             await asyncio.sleep(gap)
 
+    async def _poll_one_player(self, info: dict):
+        name = info["display_name"]
+        channel_id = info.get("channel_id") or DEFAULT_CHANNEL_ID
+
+        window_start_iso = storage.get_last_checked(name)
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        try:
+            new_stats = await self.hive.get_all_stats(name)
+        except HiveAPIError as e:
+            log.warning("Rate limit/error for %s: %s", name, e)
+            storage.set_last_checked(name, now_iso)
+            return
+
+        storage.set_last_checked(name, now_iso)
+
+        if new_stats is None:
+            return
+
+        old_stats = info.get("last_stats")
+        storage.update_last_stats(name, new_stats)
+
+        if old_stats is None:
+            return  # first run: just store the baseline
+
+        streaks = self._update_streaks(name, old_stats, new_stats)
+
+        changes = diff_stats(old_stats, new_stats)
+        if changes:
+            storage.set_last_active(name, now_iso)
+        if changes and channel_id:
+            await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks,
+                                    window_start_iso, now_iso)
+
     def _update_streaks(self, name: str, old_stats: dict, new_stats: dict) -> dict[str, int]:
-        """Schreibt den client-seitigen Live-Winstreak pro (Spiel, Modus) fort und persistiert ihn."""
+        """Advances the client-side live win streak per (game, mode) and persists it."""
         current = storage.get_streaks(name)
         updated = dict(current)
 
@@ -228,7 +236,7 @@ class TrackingCog(commands.Cog):
                 new_wins, new_played = extract_wins_played(new_leaf)
                 old_wins, old_played = extract_wins_played(old_leaf)
                 if None in (new_wins, new_played, old_wins, old_played):
-                    continue  # dieses Spiel hat keine erkennbaren wins/played-Felder
+                    continue  # this game has no recognizable wins/played fields
 
                 streak_key = f"{game_key}|{mode_label or ''}"
                 old_streak = current.get(streak_key, 0)
@@ -247,26 +255,22 @@ class TrackingCog(commands.Cog):
         if channel is None:
             return
 
-        # Gruppieren nach (Spiel, Modus)
         grouped: dict[tuple[str, str | None], list[tuple[str, float, float]]] = {}
         for full_path, old_v, new_v in changes:
             game_key, mode_label, stat_key = split_game_mode(full_path)
             grouped.setdefault((game_key, mode_label), []).append((stat_key, old_v, new_v))
 
-        # Zeitfenster fuers Rundenende: irgendwo zwischen dem letzten Check ohne
-        # Aenderung und diesem Check. Rundenstart ist ueber diese Methode NICHT
-        # feststellbar - die API liefert kein "Runde gestartet"-Signal.
         end_time = datetime.fromisoformat(window_end_iso)
         if window_start_iso:
             start_time = datetime.fromisoformat(window_start_iso)
-            window_desc = (f"🕒 Runde vermutlich beendet zwischen "
-                            f"**{start_time.strftime('%H:%M:%S')}** und **{end_time.strftime('%H:%M:%S')} UTC**")
+            window_desc = (f"🕒 Round likely finished between "
+                            f"**{start_time.strftime('%H:%M:%S')}** and **{end_time.strftime('%H:%M:%S')} UTC**")
         else:
-            window_desc = f"🕒 Erkannt um **{end_time.strftime('%H:%M:%S')} UTC**"
+            window_desc = f"🕒 Detected at **{end_time.strftime('%H:%M:%S')} UTC**"
 
         embed = discord.Embed(
-            title=f"📈 {name} hat gerade eine Runde beendet",
-            description=f"{window_desc}\n_Rundenstart ist über diese Methode nicht feststellbar._",
+            title=f"📈 {name} just finished a round",
+            description=f"{window_desc}\n_Round start time can't be determined this way._",
             color=0x2ECC71,
         )
 
@@ -279,11 +283,10 @@ class TrackingCog(commands.Cog):
                 emoji, label = label_for_key(stat_key)
                 lines.append(f"{emoji} **{label}**: {old_v} → **{new_v}**")
 
-            # KD-Delta anzeigen, falls berechenbar
             mode_dict_new = _find_stats_dict(new_stats, game_key)
             mode_dict_old = _find_stats_dict(old_stats, game_key)
             if mode_label and isinstance(mode_dict_new, dict):
-                for k, v in mode_dict_new.items():
+                for _, v in mode_dict_new.items():
                     if isinstance(v, dict):
                         mode_dict_new = v
                         break
@@ -292,20 +295,31 @@ class TrackingCog(commands.Cog):
             if kd_new is not None and kd_old is not None and kd_new != kd_old:
                 lines.append(f"⚡ **KD**: {kd_old} → **{kd_new}**")
 
-            # Live-Winstreak (client-seitig mitgezaehlt) anzeigen, falls vorhanden
             streak_key = f"{game_key}|{mode_label or ''}"
             if streak_key in streaks:
                 streak_val = streaks[streak_key]
                 fire = "🔥🔥" if streak_val >= 5 else "🔥"
-                lines.append(f"{fire} **Live-Winstreak**: {streak_val}")
+                lines.append(f"{fire} **Live Winstreak**: {streak_val}")
 
             embed.add_field(name=title, value="\n".join(lines), inline=False)
 
-        await channel.send(embed=embed)
+        try:
+            await channel.send(embed=embed)
+        except discord.HTTPException:
+            log.exception("Failed to send alert for %s", name)
 
     @poll_loop.before_loop
     async def before_poll(self):
         await self.bot.wait_until_ready()
+
+    @poll_loop.error
+    async def poll_loop_error(self, error: BaseException):
+        # Safety net: discord.ext.tasks stops a loop after an unhandled
+        # exception. Log it and restart so tracking never silently dies.
+        log.error("poll_loop crashed unexpectedly, restarting in 10s", exc_info=error)
+        await asyncio.sleep(10)
+        if not self.poll_loop.is_running():
+            self.poll_loop.restart()
 
 
 async def setup(bot: commands.Bot):
