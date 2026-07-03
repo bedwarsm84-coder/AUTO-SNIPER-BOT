@@ -1,13 +1,14 @@
 """
 formatting.py
-Gemeinsame Helfer fuer StatsCog und TrackingCog:
- - Erkennung von BedWars/SkyWars-Modi (Solo/Duos/Squads/Mega) anhand des JSON-Pfads
- - KD-Berechnung
- - huebsche Labels/Emojis fuer bekannte Stat-Felder
+Shared helpers for StatsCog and TrackingCog:
+ - detecting BedWars/SkyWars modes (Solo/Duos/Squads/Mega) from the JSON path
+ - KD calculation
+ - pretty labels/emoji for known stat fields
+ - client-side "live" win streak tracking
 
-Hinweis: Hive dokumentiert die genauen JSON-Feldnamen nicht oeffentlich.
-Die Aliase unten decken die gaengigsten Schreibweisen ab. Falls Hive andere
-Namen verwendet, per /raw pruefen und hier ergaenzen.
+Note: Hive does not publicly document its exact JSON field names. The aliases
+below cover the most common spellings seen in real responses. If Hive uses a
+different name for something, check with /raw and extend the tables below.
 """
 from __future__ import annotations
 
@@ -21,7 +22,10 @@ MODE_ALIASES: dict[str, str] = {
     "manor": "Manor",
 }
 
-# Bekannte Stat-Feld-Fragmente -> (Emoji, huebsches Label)
+# Known stat-field fragments -> (emoji, pretty label).
+# NOTE: order does not matter for correctness — label_for_key() always checks
+# the longest fragments first so e.g. "final_kills" is never mislabeled as
+# generic "kills".
 KNOWN_FIELDS: dict[str, tuple[str, str]] = {
     "winstreak": ("🔥", "Winstreak"),
     "win_streak": ("🔥", "Winstreak"),
@@ -29,35 +33,35 @@ KNOWN_FIELDS: dict[str, tuple[str, str]] = {
     "victories": ("🏆", "Wins"),
     "wins": ("🏆", "Wins"),
     "losses": ("💀", "Losses"),
-    "kills": ("⚔️", "Kills"),
-    "deaths": ("☠️", "Deaths"),
     "finalkills": ("🗡️", "Final Kills"),
     "finaldeaths": ("🪦", "Final Deaths"),
+    "kills": ("⚔️", "Kills"),
+    "deaths": ("☠️", "Deaths"),
     "bedsdestroyed": ("🛏️", "Beds Destroyed"),
     "level": ("⭐", "Level"),
     "prestige": ("🎖️", "Prestige"),
     "xp": ("✨", "XP"),
-    "played": ("🎮", "Games Played"),
     "gamesplayed": ("🎮", "Games Played"),
+    "played": ("🎮", "Games Played"),
 }
 
-# Felder, die zwar in der API-Antwort stehen, aber keine anzeigbaren Stats sind
-# (IDs, Zeitstempel usw.) - werden in /stats und Alerts ausgeblendet.
+# Fields that exist in the API response but aren't displayable stats
+# (IDs, timestamps, ...) - hidden from /stats, /raw formatting, and alerts.
 EXCLUDED_FIELDS: set[str] = {
     "uuid", "id", "firstplayed", "lastplayed", "createdat", "updatedat",
 }
 
 
 def is_excluded(key: str) -> bool:
-    """True fuer Felder, die keine anzeigbaren Stats sind (UUID, Timestamps, ...)."""
+    """True for fields that aren't displayable stats (UUID, timestamps, ...)."""
     norm = re.sub(r"[^a-z]", "", key.lower())
     return norm in EXCLUDED_FIELDS
 
 
 def label_for_key(key: str) -> tuple[str, str]:
-    """Gibt (Emoji, huebsches Label) fuer ein rohes JSON-Feld zurueck.
-    Prueft laengere/spezifischere Fragmente zuerst, damit z.B. 'final_kills'
-    nicht faelschlich als generisches 'kills' erkannt wird."""
+    """Returns (emoji, pretty label) for a raw JSON field.
+    Checks longer/more specific fragments first so e.g. 'final_kills' is not
+    mislabeled as generic 'kills'."""
     norm = re.sub(r"[^a-z]", "", key.lower())
     for fragment, (emoji, label) in sorted(KNOWN_FIELDS.items(), key=lambda kv: -len(kv[0])):
         if fragment in norm:
@@ -67,10 +71,10 @@ def label_for_key(key: str) -> tuple[str, str]:
 
 def split_game_mode(full_path: str) -> tuple[str, str | None, str]:
     """
-    Zerlegt einen diff_stats-Pfad wie 'bed.solo.wins' in
+    Splits a diff_stats path like 'bed.solo.wins' into
     (game_key='bed', mode_label='Solo', stat_key='wins').
-    Wenn kein bekannter Modus erkannt wird, ist mode_label None
-    und stat_key ist der Rest ab dem zweiten Segment.
+    If no known mode is recognized, mode_label is None and stat_key is
+    everything from the second segment onward.
     """
     parts = full_path.split(".")
     game_key = parts[0]
@@ -84,13 +88,15 @@ def split_game_mode(full_path: str) -> tuple[str, str | None, str]:
 
 
 def compute_kd(data: dict) -> float | None:
-    """Sucht kills/deaths auf oberster Ebene eines Stats-Dicts und berechnet KD."""
+    """Looks for kills/deaths at the top level of a stats dict and computes KD."""
     kills = deaths = None
     for key, value in data.items():
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
         norm = re.sub(r"[^a-z]", "", key.lower())
-        if norm == "kills" and isinstance(value, (int, float)):
+        if norm == "kills":
             kills = value
-        elif norm == "deaths" and isinstance(value, (int, float)):
+        elif norm == "deaths":
             deaths = value
     if kills is None or deaths is None:
         return None
@@ -100,14 +106,14 @@ def compute_kd(data: dict) -> float | None:
 
 
 # ---------------------------------------------------------------------------
-# "Live"-Winstreak: von der Hive-API selbst NICHT geliefert (siehe README).
-# Wird hier client-seitig mitgezaehlt: jeder erkannte Sieg zaehlt hoch,
-# jede erkannte Runde ohne Sieg setzt zurueck auf 0. Basiert auf dem
-# periodischen Vergleich von "wins"/"victories" und "played"/"gamesplayed".
+# "Live" win streak: NOT provided by the Hive API itself (see README).
+# Tracked client-side here: every detected win increments it, every detected
+# non-win round resets it to 0. Based on periodically comparing "wins"/
+# "victories" and "played"/"gamesplayed" fields.
 # ---------------------------------------------------------------------------
 
 def extract_wins_played(data: dict) -> tuple[float | None, float | None]:
-    """Sucht wins- und played-aehnliche Felder in einem flachen Stats-Dict."""
+    """Finds wins-like and played-like fields in a flat stats dict."""
     wins = played = None
     for key, value in data.items():
         if not isinstance(value, (int, float)) or isinstance(value, bool):
@@ -122,9 +128,9 @@ def extract_wins_played(data: dict) -> tuple[float | None, float | None]:
 
 def leaf_stat_dicts(game_data: dict) -> dict[str | None, dict]:
     """
-    Zerlegt die Stats eines Spiels in {modus_label_oder_None: flaches_stats_dict}.
-    Wenn keine Modus-Unterteilung existiert (haeufig bei Hive), gibt es genau
-    einen Eintrag mit Key None.
+    Splits a game's stats into {mode_label_or_None: flat_stats_dict}.
+    If there's no mode split (common on Hive), returns a single entry keyed
+    by None.
     """
     if any(k.lower() in MODE_ALIASES for k in game_data.keys()):
         result: dict[str | None, dict] = {}
@@ -137,11 +143,12 @@ def leaf_stat_dicts(game_data: dict) -> dict[str | None, dict]:
 
 def update_streak(old_streak: int, delta_played: float, delta_wins: float) -> int:
     """
-    Schreibt einen client-seitig gezaehlten Winstreak fort.
-    - Keine neue Runde seit dem letzten Check -> Streak bleibt gleich.
-    - Alle neuen Runden waren Siege -> Streak steigt um delta_wins.
-    - Mindestens eine neue Runde war kein Sieg -> Streak wird auf 0 zurueckgesetzt
-      (konservative Annahme, falls im Poll-Intervall mehrere Runden lagen).
+    Advances a client-side tracked win streak.
+    - No new round since the last check -> streak stays the same.
+    - All new rounds were wins -> streak increases by delta_wins.
+    - At least one new round was not a win -> streak resets to 0
+      (conservative assumption if multiple rounds happened within one
+      poll interval).
     """
     if delta_played <= 0:
         return old_streak
