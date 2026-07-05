@@ -1,7 +1,7 @@
 """
 cogs/tracking.py
 Player watchlist: periodic stat comparison + Discord alert on change,
-plus a live-updating full-stats dashboard message (/livestats).
+plus a live-updating "reactor" stats dashboard message (/livestats).
 
 Robustness: every per-player step inside the poll loop is wrapped so a
 single failure (bad data, API hiccup, formatting bug) never kills the
@@ -25,7 +25,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import storage
-from cogs.stats import GAME_NAMES, build_full_stats_embed
+from cogs.stats import GAME_NAMES, build_live_dashboard_embed
 from formatting import (
     label_for_key, compute_kd, split_game_mode, is_excluded,
     leaf_stat_dicts, extract_wins_played, update_streak,
@@ -175,11 +175,11 @@ class TrackingCog(commands.Cog):
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
 
-        embed = build_full_stats_embed(name, data)
-        embed.set_footer(text=f"🔴 Live · updates roughly every {POLL_INTERVAL}s")
+        storage.update_last_stats(name, data)
+
+        embed = build_live_dashboard_embed(name, data, storage.get_last_active(name), POLL_INTERVAL)
         msg = await interaction.followup.send(embed=embed)
 
-        storage.update_last_stats(name, data)
         storage.set_live_message(name, msg.channel.id, msg.id)
 
     @app_commands.command(description="Stop the live-updating dashboard for a player")
@@ -230,20 +230,24 @@ class TrackingCog(commands.Cog):
         old_stats = info.get("last_stats")
         storage.update_last_stats(name, new_stats)
 
+        streaks = {}
+        changes = []
+        if old_stats is not None:
+            streaks = self._update_streaks(name, old_stats, new_stats)
+            changes = diff_stats(old_stats, new_stats)
+            if changes:
+                storage.set_last_active(name, now_iso)
+
         # Keep the live dashboard message (if any) fresh every single cycle,
-        # regardless of whether anything changed.
+        # regardless of whether anything changed. Must run AFTER
+        # set_last_active() above so the activity status reflects this cycle.
         live = storage.get_live_message(name)
         if live:
             await self._update_live_message(name, live, new_stats)
 
         if old_stats is None:
-            return  # first run: just store the baseline
+            return  # first run: just stored the baseline, nothing to alert on
 
-        streaks = self._update_streaks(name, old_stats, new_stats)
-
-        changes = diff_stats(old_stats, new_stats)
-        if changes:
-            storage.set_last_active(name, now_iso)
         if changes and channel_id:
             await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks,
                                     window_start_iso, now_iso)
@@ -258,11 +262,7 @@ class TrackingCog(commands.Cog):
             storage.clear_live_message(name)
             return
 
-        embed = build_full_stats_embed(name, new_stats)
-        embed.set_footer(
-            text=f"🔴 Live · updates every {POLL_INTERVAL}s · "
-                 f"last update {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
-        )
+        embed = build_live_dashboard_embed(name, new_stats, storage.get_last_active(name), POLL_INTERVAL)
         try:
             await msg.edit(embed=embed)
         except discord.HTTPException:
