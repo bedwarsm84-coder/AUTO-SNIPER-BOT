@@ -1,6 +1,7 @@
 """
 cogs/tracking.py
-Player watchlist: periodic stat comparison + Discord alert on change.
+Player watchlist: periodic stat comparison + Discord alert on change,
+plus a live-updating full-stats dashboard message (/livestats).
 
 Robustness: every per-player step inside the poll loop is wrapped so a
 single failure (bad data, API hiccup, formatting bug) never kills the
@@ -24,7 +25,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 import storage
-from cogs.stats import GAME_NAMES
+from cogs.stats import GAME_NAMES, build_full_stats_embed
 from formatting import (
     label_for_key, compute_kd, split_game_mode, is_excluded,
     leaf_stat_dicts, extract_wins_played, update_streak,
@@ -159,6 +160,34 @@ class TrackingCog(commands.Cog):
                                f"(poll interval: {POLL_INTERVAL}s). Hive has no official online status API.")
         await interaction.response.send_message(embed=embed)
 
+    @app_commands.command(description="Post a live-updating stats dashboard for a player (auto-refreshes)")
+    @app_commands.describe(name="Minecraft Bedrock username")
+    async def livestats(self, interaction: discord.Interaction, name: str):
+        await interaction.response.defer()
+        storage.add_player(name, interaction.channel_id)  # no-op if already tracked
+
+        try:
+            data = await self.hive.get_all_stats(name)
+        except HiveAPIError as e:
+            await interaction.followup.send(f"⚠️ API error: {e}")
+            return
+        if data is None:
+            await interaction.followup.send(f"❌ Player `{name}` not found.")
+            return
+
+        embed = build_full_stats_embed(name, data)
+        embed.set_footer(text=f"🔴 Live · updates roughly every {POLL_INTERVAL}s")
+        msg = await interaction.followup.send(embed=embed)
+
+        storage.update_last_stats(name, data)
+        storage.set_live_message(name, msg.channel.id, msg.id)
+
+    @app_commands.command(description="Stop the live-updating dashboard for a player")
+    @app_commands.describe(name="Minecraft Bedrock username")
+    async def stoplive(self, interaction: discord.Interaction, name: str):
+        storage.clear_live_message(name)
+        await interaction.response.send_message(f"✅ Live dashboard for `{name}` stopped.")
+
     # ---------------------------------------------------------------- polling
 
     @tasks.loop(seconds=POLL_INTERVAL)
@@ -201,6 +230,12 @@ class TrackingCog(commands.Cog):
         old_stats = info.get("last_stats")
         storage.update_last_stats(name, new_stats)
 
+        # Keep the live dashboard message (if any) fresh every single cycle,
+        # regardless of whether anything changed.
+        live = storage.get_live_message(name)
+        if live:
+            await self._update_live_message(name, live, new_stats)
+
         if old_stats is None:
             return  # first run: just store the baseline
 
@@ -212,6 +247,26 @@ class TrackingCog(commands.Cog):
         if changes and channel_id:
             await self._send_alert(channel_id, name, old_stats, new_stats, changes, streaks,
                                     window_start_iso, now_iso)
+
+    async def _update_live_message(self, name: str, live: dict, new_stats: dict):
+        channel = self.bot.get_channel(live["channel_id"])
+        if channel is None:
+            return
+        try:
+            msg = await channel.fetch_message(live["message_id"])
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            storage.clear_live_message(name)
+            return
+
+        embed = build_full_stats_embed(name, new_stats)
+        embed.set_footer(
+            text=f"🔴 Live · updates every {POLL_INTERVAL}s · "
+                 f"last update {datetime.now(timezone.utc).strftime('%H:%M:%S')} UTC"
+        )
+        try:
+            await msg.edit(embed=embed)
+        except discord.HTTPException:
+            log.exception("Failed to update live message for %s", name)
 
     def _update_streaks(self, name: str, old_stats: dict, new_stats: dict) -> dict[str, int]:
         """Advances the client-side live win streak per (game, mode) and persists it."""
