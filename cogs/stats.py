@@ -1,10 +1,7 @@
 """
 cogs/stats.py
-Slash commands for looking up Hive stats.
-
-Displays known fields (Wins, Kills, Winstreak, ...) with nice labels,
-computes KD where possible, and groups by game mode (Solo/Duos/Squads/Mega)
-if the API response is actually nested that way for the given game.
+Slash commands for looking up Hive stats, plus build_full_stats_embed()
+which is shared with cogs/tracking.py for the /livestats dashboard.
 """
 from __future__ import annotations
 
@@ -30,13 +27,10 @@ GAME_NAMES = {
 
 
 def _is_mode_split(data: dict) -> bool:
-    """Checks whether a stats dict is nested by mode (solo/duos/squads/...)."""
     return any(k.lower() in MODE_ALIASES for k in data.keys())
 
 
 def _format_block(data: dict, limit: int = 10) -> str:
-    """Formats a flat stats dict as a nice line list including KD.
-    Only shows numeric stat fields (no UUID/timestamps/strings)."""
     lines = []
     for key, value in list(data.items()):
         if is_excluded(key):
@@ -48,6 +42,43 @@ def _format_block(data: dict, limit: int = 10) -> str:
     if kd is not None:
         lines.append(f"⚡ **KD**: {kd}")
     return "\n".join(lines[:limit]) if lines else "_No displayable fields found_"
+
+
+def build_full_stats_embed(name: str, data: dict, game: str | None = None) -> discord.Embed:
+    """Shared embed builder used by /stats and the /livestats dashboard."""
+    embed = discord.Embed(title=f"🐝 Hive Stats: {name}", color=0xF5A623)
+
+    if game:
+        if _is_mode_split(data):
+            for mode_key, mode_data in data.items():
+                if isinstance(mode_data, dict) and mode_data:
+                    mode_label = MODE_ALIASES.get(mode_key.lower(), mode_key.capitalize())
+                    embed.add_field(
+                        name=f"{GAME_NAMES.get(game, game)} · {mode_label}",
+                        value=_format_block(mode_data),
+                        inline=True,
+                    )
+        else:
+            embed.add_field(name=GAME_NAMES.get(game, game), value=_format_block(data), inline=False)
+    else:
+        for game_key, game_data in data.items():
+            if not isinstance(game_data, dict) or not game_data:
+                continue
+            label = GAME_NAMES.get(game_key, game_key)
+            if _is_mode_split(game_data):
+                first_mode_key, first_mode_data = next(iter(game_data.items()))
+                mode_label = MODE_ALIASES.get(first_mode_key.lower(), first_mode_key.capitalize())
+                embed.add_field(
+                    name=f"{label} ({mode_label}, more via /stats game:{game_key})",
+                    value=_format_block(first_mode_data, limit=6),
+                    inline=False,
+                )
+            else:
+                embed.add_field(name=label, value=_format_block(game_data, limit=6), inline=False)
+
+    if not embed.fields:
+        embed.description = "No displayable fields found — try `/raw` for the raw data."
+    return embed
 
 
 class StatsCog(commands.Cog):
@@ -76,38 +107,7 @@ class StatsCog(commands.Cog):
             await interaction.followup.send(f"❌ Player `{name}` not found.")
             return
 
-        embed = discord.Embed(title=f"🐝 Hive Stats: {name}", color=0xF5A623)
-
-        if game:
-            if _is_mode_split(data):
-                for mode_key, mode_data in data.items():
-                    if isinstance(mode_data, dict) and mode_data:
-                        mode_label = MODE_ALIASES.get(mode_key.lower(), mode_key.capitalize())
-                        embed.add_field(
-                            name=f"{GAME_NAMES.get(game, game)} · {mode_label}",
-                            value=_format_block(mode_data),
-                            inline=True,
-                        )
-            else:
-                embed.add_field(name=GAME_NAMES.get(game, game), value=_format_block(data), inline=False)
-        else:
-            for game_key, game_data in data.items():
-                if not isinstance(game_data, dict) or not game_data:
-                    continue
-                label = GAME_NAMES.get(game_key, game_key)
-                if _is_mode_split(game_data):
-                    first_mode_key, first_mode_data = next(iter(game_data.items()))
-                    mode_label = MODE_ALIASES.get(first_mode_key.lower(), first_mode_key.capitalize())
-                    embed.add_field(
-                        name=f"{label} ({mode_label}, more via /stats game:{game_key})",
-                        value=_format_block(first_mode_data, limit=6),
-                        inline=False,
-                    )
-                else:
-                    embed.add_field(name=label, value=_format_block(game_data, limit=6), inline=False)
-
-        if not embed.fields:
-            embed.description = "No displayable fields found — try `/raw` for the raw data."
+        embed = build_full_stats_embed(name, data, game)
         await interaction.followup.send(embed=embed)
 
     @app_commands.command(description="Show the raw API response (e.g. to find mode/winstreak field names)")
