@@ -23,7 +23,6 @@ def load() -> dict:
     try:
         return json.loads(DATA_FILE.read_text())
     except (json.JSONDecodeError, OSError):
-        # Corrupt or unreadable file: start fresh rather than crashing the bot.
         return {"players": {}}
 
 
@@ -41,9 +40,10 @@ def add_player(name: str, channel_id: int) -> bool:
         "display_name": name,
         "channel_id": channel_id,
         "last_stats": None,
-        "streaks": {},            # e.g. {"bed|": 5, "sky|Solo": 2}
-        "last_active_at": None,   # ISO timestamp of the last detected stat change
-        "last_checked_at": None,  # ISO timestamp of the last poll attempt
+        "streaks": {},
+        "last_active_at": None,
+        "last_checked_at": None,
+        "live_message": None,   # NEW: {"channel_id": int, "message_id": int}
     }
     save(data)
     return True
@@ -111,3 +111,27 @@ def get_last_checked(name: str) -> str | None:
     data = load()
     key = name.lower()
     return data["players"].get(key, {}).get("last_checked_at")
+
+
+# ---------------------------------------------------------------- NEW: live dashboard message
+
+def set_live_message(name: str, channel_id: int, message_id: int) -> None:
+    data = load()
+    key = name.lower()
+    if key in data["players"]:
+        data["players"][key]["live_message"] = {"channel_id": channel_id, "message_id": message_id}
+        save(data)
+
+
+def get_live_message(name: str) -> dict | None:
+    data = load()
+    key = name.lower()
+    return data["players"].get(key, {}).get("live_message")
+
+
+def clear_live_message(name: str) -> None:
+    data = load()
+    key = name.lower()
+    if key in data["players"]:
+        data["players"][key]["live_message"] = None
+        save(data)
