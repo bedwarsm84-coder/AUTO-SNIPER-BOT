@@ -50,7 +50,7 @@ async def on_close():
 # ─── Owner-only: Bot von einem Server entfernen ───────────────────────────
 # Setze hier deine eigene Discord User-ID ein (Entwicklermodus an →
 # Rechtsklick auf deinen Namen → "ID kopieren").
-OWNER_ID = 1315317603773710377  # <-- HIER ANPASSEN
+OWNER_ID = 1315317603773710377 # <-- HIER ANPASSEN
 
 
 @bot.tree.command(name="leaveserver", description="Lässt den Bot einen Server verlassen (nur Owner)")
@@ -70,6 +70,39 @@ async def leaveserver(interaction: discord.Interaction, guild_id: str):
     name = guild.name
     await guild.leave()
     await interaction.response.send_message(f"Habe **{name}** verlassen.", ephemeral=True)
+
+
+@bot.tree.command(name="serverlist", description="Zeigt alle Server, auf denen der Bot aktiv ist (nur Owner)")
+async def serverlist(interaction: discord.Interaction):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+        return
+
+    guilds = bot.guilds
+    if not guilds:
+        await interaction.response.send_message("Der Bot ist aktuell auf keinem Server.", ephemeral=True)
+        return
+
+    lines = []
+    for g in sorted(guilds, key=lambda x: x.member_count or 0, reverse=True):
+        owner = f"{g.owner}" if g.owner else "unbekannt"
+        lines.append(f"**{g.name}**\n└ ID: `{g.id}` | Mitglieder: {g.member_count} | Owner: {owner}")
+
+    # Discord-Nachrichten sind auf ~2000 Zeichen begrenzt -> ggf. aufteilen
+    chunks, current = [], ""
+    for line in lines:
+        if len(current) + len(line) + 1 > 1800:
+            chunks.append(current)
+            current = ""
+        current += line + "\n"
+    if current:
+        chunks.append(current)
+
+    await interaction.response.send_message(
+        f"📋 Bot ist aktuell auf **{len(guilds)}** Server(n):\n\n{chunks[0]}", ephemeral=True
+    )
+    for chunk in chunks[1:]:
+        await interaction.followup.send(chunk, ephemeral=True)
 
 
 @bot.tree.error
@@ -101,4 +134,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-    
+                     
