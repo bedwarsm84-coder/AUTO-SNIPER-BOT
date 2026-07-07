@@ -47,6 +47,31 @@ async def on_close():
     await bot.hive.close()
 
 
+# ─── Owner-only: Bot von einem Server entfernen ───────────────────────────
+# Setze hier deine eigene Discord User-ID ein (Entwicklermodus an →
+# Rechtsklick auf deinen Namen → "ID kopieren").
+OWNER_ID = 1315317603773710377  # <-- HIER ANPASSEN
+
+
+@bot.tree.command(name="leaveserver", description="Lässt den Bot einen Server verlassen (nur Owner)")
+@app_commands.describe(guild_id="Die ID des Servers, den der Bot verlassen soll")
+async def leaveserver(interaction: discord.Interaction, guild_id: str):
+    if interaction.user.id != OWNER_ID:
+        await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+        return
+    try:
+        guild = bot.get_guild(int(guild_id))
+    except ValueError:
+        await interaction.response.send_message("Ungültige Server-ID.", ephemeral=True)
+        return
+    if guild is None:
+        await interaction.response.send_message("Server nicht gefunden (Bot ist dort evtl. nicht mehr Mitglied).", ephemeral=True)
+        return
+    name = guild.name
+    await guild.leave()
+    await interaction.response.send_message(f"Habe **{name}** verlassen.", ephemeral=True)
+
+
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
     """Global fallback so command bugs show a clear message instead of a
@@ -76,3 +101,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+    
